@@ -7,154 +7,144 @@
 
 import cv2
 import mediapipe as mp
-import numpy as np
-import time
 import pyautogui
-import math
-from ctypes import cast, POINTER
-from comtypes import CLSCTX_ALL
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+import speech_recognition as sr
+import google.generativeai as genai
+import os
+import pyttsx3
 
-class HandDetector:
-    def __init__(self, mode=False, maxHands=2, detectionCon=0.5, trackCon=0.5):
-        self.mode = mode
-        self.maxHands = maxHands
-        self.detectionCon = detectionCon
-        self.trackCon = trackCon
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
 
-        self.mpHands = mp.solutions.hands
-        self.hands = self.mpHands.Hands(static_image_mode=self.mode,
-                                        max_num_hands=self.maxHands,
-                                        min_detection_confidence=self.detectionCon,
-                                        min_tracking_confidence=self.trackCon)
-        self.mpDraw = mp.solutions.drawing_utils
-
-    def findHands(self, img, draw=True):
-        imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        self.results = self.hands.process(imgRGB)
-
-        if self.results.multi_hand_landmarks:
-            for handLms in self.results.multi_hand_landmarks:
-                if draw:
-                    self.mpDraw.draw_landmarks(img, handLms, self.mpHands.HAND_CONNECTIONS)
-        return img
-
-    def findPosition(self, img, handNo=0, draw=True):
-        lmList = []
-        if self.results.multi_hand_landmarks:
-            myHand = self.results.multi_hand_landmarks[handNo]
-            for id, lm in enumerate(myHand.landmark):
-                h, w, c = img.shape
-                cx, cy = int(lm.x * w), int(lm.y * h)
-                lmList.append([id, cx, cy])
-
-                if draw:
-                    cv2.circle(img, (cx, cy), 5, (255, 0, 255), cv2.FILLED)
-        return lmList
-
-# Initialize webcam
-wCam, hCam = 640, 480
 cap = cv2.VideoCapture(0)
-cap.set(3, wCam)
-cap.set(4, hCam)
+recognizer = sr.Recognizer()
 
-# Initialize Hand Detector
-detector = HandDetector(maxHands=1, detectionCon=0.8, trackCon=0.8)
+genai.configure(api_key=os.getenv('GOOGLE_API_KEY')) #environment variable
+model = genai.GenerativeModel('gemini-pro')
+engine = pyttsx3.init()
 
-# Audio Control Setup
-devices = AudioUtilities.GetSpeakers()
-interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-volume = cast(interface, POINTER(IAudioEndpointVolume))
-volRange = volume.GetVolumeRange()
+def detect_gesture(landmarks):
+    index_tip = landmarks[8].y
+    thumb_tip = landmarks[4].y
+    if index_tip < thumb_tip:
+        return "play"
+    elif index_tip > thumb_tip:
+        return "pause"
+    return None
 
-minVol = volRange[0]  # -63.5 dB
-maxVol = volRange[1]  # 0 dB
-vol = 0
-volBar = 400
-volPer = 0
+def recognize_speech():
+    with sr.Microphone() as source:
+        print("Listening for voice commands...")
+        try:
+            audio = recognizer.listen(source, timeout=5)
+            command = recognizer.recognize_google(audio).lower()
+            print(f"You said: {command}")
+            return command
+        except sr.WaitTimeoutError:
+            print("No voice command detected.")
+            return None
+        except sr.UnknownValueError:
+            print("Could not understand audio.")
+            return None
+        except sr.RequestError as e:
+            print(f"Speech recognition error: {e}")
+            return None
 
-# Gesture Recognition Parameters
-tipIds = [4, 8, 12, 16, 20]
-mode = ""
-active = 0
+def get_gemini_response(prompt):
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+        return "Sorry, I encountered an error with Gemini."
 
-pyautogui.FAILSAFE = False
-pTime = 0
-
-while True:
-    success, img = cap.read()
-    img = detector.findHands(img)
-    lmList = detector.findPosition(img, draw=False)
+def count_fingers(landmarks):
+    if not landmarks:
+        return 0
     fingers = []
+    for hand_landmarks in landmarks:
+        hand_landmarks = hand_landmarks.landmark
+        thumb_tip = hand_landmarks[mp_hands.HandLandmark.THUMB_TIP]
+        index_tip = hand_landmarks[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+        middle_tip = hand_landmarks[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+        ring_tip = hand_landmarks[mp_hands.HandLandmark.RING_FINGER_TIP]
+        pinky_tip = hand_landmarks[mp_hands.HandLandmark.PINKY_TIP]
+        thumb_ip = hand_landmarks[mp_hands.HandLandmark.THUMB_IP]
+        index_pip = hand_landmarks[mp_hands.HandLandmark.INDEX_FINGER_PIP]
+        middle_pip = hand_landmarks[mp_hands.HandLandmark.MIDDLE_FINGER_PIP]
+        ring_pip = hand_landmarks[mp_hands.HandLandmark.RING_FINGER_PIP]
+        pinky_pip = hand_landmarks[mp_hands.HandLandmark.PINKY_PIP]
 
-    if len(lmList) >= 21:  # Ensure at least 21 landmarks (full hand detected)
-        # Thumb
-        fingers.append(1 if lmList[tipIds[0]][1] > lmList[tipIds[0] - 1][1] else 0)
+        fingers.append(thumb_tip.x > thumb_ip.x)
+        fingers.append(index_tip.y < index_pip.y)
+        fingers.append(middle_tip.y < middle_pip.y)
+        fingers.append(ring_tip.y < ring_pip.y)
+        fingers.append(pinky_tip.y < pinky_pip.y)
 
-        # 4 Fingers
-        for id in range(1, 5):
-            fingers.append(1 if lmList[tipIds[id]][2] < lmList[tipIds[id] - 2][2] else 0)
+        finger_count = sum(fingers)
+        return finger_count
+    return 0
 
-        # Mode Switching
-        if fingers == [0, 0, 0, 0, 0] and active == 0:
-            mode = "Neutral"
-        elif (fingers == [0, 1, 0, 0, 0] or fingers == [0, 1, 1, 0, 0]) and active == 0:
-            mode = "Scroll"
-            active = 1
-        elif fingers == [1, 1, 0, 0, 0] and active == 0:
-            mode = "Volume"
-            active = 1
-        elif fingers == [1, 1, 1, 1, 1] and active == 0:
-            mode = "Cursor"
-            active = 1
+video_playing = True
+voice_mode = False
 
-    # Scroll Control
-    if mode == "Scroll":
-        if fingers == [0, 1, 0, 0, 0]:
-            pyautogui.scroll(300)
-        elif fingers == [0, 1, 1, 0, 0]:
-            pyautogui.scroll(-300)
-        elif fingers == [0, 0, 0, 0, 0]:
-            active = 0
-            mode = "Neutral"
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-    # Volume Control
-    if mode == "Volume" and len(lmList) >= 9:
-        if fingers[-1] == 1:
-            active = 0
-            mode = "Neutral"
-        else:
-            x1, y1 = lmList[4][1], lmList[4][2]
-            x2, y2 = lmList[8][1], lmList[8][2]
-            length = math.hypot(x2 - x1, y2 - y1)
-            vol = np.interp(length, [50, 200], [minVol, maxVol])
-            volume.SetMasterVolumeLevel(vol, None)
-            volPer = np.interp(vol, [minVol, maxVol], [0, 100])
+    frame = cv2.flip(frame, 1)
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(rgb_frame)
 
-    # Cursor Control
-    if mode == "Cursor" and len(lmList) >= 9:
-        if fingers[1:] == [0, 0, 0, 0]:  # Excluding thumb
-            active = 0
-            mode = "Neutral"
-        else:
-            x1, y1 = lmList[8][1], lmList[8][2]
-            screen_w, screen_h = pyautogui.size()
-            X = np.interp(x1, [50, 590], [0, screen_w])
-            Y = np.interp(y1, [50, 430], [0, screen_h])
-            pyautogui.moveTo(int(X), int(Y))
-            if fingers[0] == 0:
-                pyautogui.click()
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            finger_count = count_fingers(results.multi_hand_landmarks)
 
-    # Display Mode on Screen
-    cv2.putText(img, f"Mode: {mode}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 3)
+            if finger_count == 3 and not voice_mode:
+                voice_mode = True
+                cv2.putText(frame, "Voice Mode", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                engine.say("Voice mode activated.")
+                engine.runAndWait()
+            elif finger_count == 4 and voice_mode:
+                voice_mode = False
+                cv2.putText(frame, "Voice Mode Off", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                engine.say("Voice mode off.")
+                engine.runAndWait()
+            elif voice_mode:
+                command = recognize_speech()
+                if command:
+                    if "volume up" in command:
+                        pyautogui.press("up")
+                        engine.say("Volume up.")
+                    elif "volume down" in command:
+                        pyautogui.press("down")
+                        engine.say("Volume down.")
+                    elif "mute" in command:
+                        pyautogui.press("m")
+                        engine.say("Mute.")
+                    else:
+                        ai_response = get_gemini_response(command)
+                        print(f"Gemini Response: {ai_response}")
+                        engine.say(ai_response)
+                else:
+                    cv2.putText(frame, "No Command", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                engine.runAndWait()
+            else:
+                gesture = detect_gesture(hand_landmarks.landmark)
+                if gesture == "play" and not video_playing:
+                    video_playing = True
+                    pyautogui.press("k")
+                    cv2.putText(frame, "Play", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                elif gesture == "pause" and video_playing:
+                    video_playing = False
+                    pyautogui.press("k")
+                    cv2.putText(frame, "Pause", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
-    # Display FPS
-    cTime = time.time()
-    fps = 1 / (cTime - pTime)
-    pTime = cTime
-    cv2.putText(img, f"FPS: {int(fps)}", (500, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 3)
+    cv2.imshow("Gesture Control", frame)
 
-    cv2.imshow("Gesture Control", img)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
