@@ -1,3 +1,10 @@
+#Gen AI Hackathon 
+#Team 70
+#Team Lead:B.NISSI APEKSHA(23WH1A0523)
+#Member1:P.TEENA PRANATHI(23WH1A0508)
+#Member2:B.SAI DEVI SRI(23WH1A0513)
+#Member3:P.KEERTHI(23WH1A0534)
+
 import cv2
 import mediapipe as mp
 import numpy as np
